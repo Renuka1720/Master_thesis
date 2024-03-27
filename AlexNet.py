@@ -1,4 +1,5 @@
 import DataSets
+import Preprocessing
 
 import torch
 import torch.nn as nn
@@ -20,21 +21,20 @@ class AlexNetModel(LightningModule):
     def __init__(self):
         super(AlexNetModel, self).__init__()
 
-        # Load pretrained AlexNet model
-        self.model = models.alexnet(pretrained=True)
+        # pretrained AlexNet model
+        self.model = models.alexnet(weights=models.AlexNet_Weights.DEFAULT)
         for param in self.model.parameters():
             param.requires_grad = False
         num_classes = 37
-        # Modify the last fully connected layer for your number of classes
+        # Modifying the last fully connected layer to have 37 classes
         self.model.classifier[6] = nn.Linear(4096, num_classes)
-        # Unfreeze the last layer
+        # Unfreezing the last layer
         for param in self.model.classifier[6].parameters():
             param.requires_grad = True
 
-        self.batchsize=16
-
-        # # Rectification non-linearity (ReLU)
-        # self.relu = nn.ReLU()
+        self.batchsize=256
+        self.gradient_steps = 0    # Counter for gradient steps
+        self.relu = nn.ReLU()
         self.question_slices = [slice(0, 3), slice(3, 5), slice(5, 7), slice(7, 9), slice(9, 13), slice(13, 15),
                                 slice(15, 18), slice(18, 25), slice(25, 28), slice(28, 31), slice(31, 37)]
 
@@ -59,13 +59,17 @@ class AlexNetModel(LightningModule):
         x_clipped = self.relu(x) # negative values become 0
         normalisation_denoms = (torch.mm(x_clipped, self.normalisation_mask)) + 1e-12
         x_normalised = x_clipped / normalisation_denoms
-        # x_normalised_clone = x_normalised.clone()
-        for probs_slice, scale_idx in self.scaling_sequence:
-            x_normalised[:, probs_slice] = x_normalised[:, probs_slice] * x_normalised[:, scale_idx].unsqueeze(1)
+        x_normalised_clone = x_normalised.clone()
+        x_normalised_clone[:, slice(3,5)] = x_normalised[:, slice(3,5)] * x_normalised[:, 1].unsqueeze(1)
+        x_normalised_clone[:, slice(5,13)] = x_normalised[:, slice(5,13)] * x_normalised[:, 1].unsqueeze(1) * x_normalised[:, 4].unsqueeze(1)
+        x_normalised_clone[:, slice(15,18)] = x_normalised[:, slice(15,18)] * x_normalised[:, 0].unsqueeze(1)
+        x_normalised_clone[:, slice(18,25)] = x_normalised[:, slice(18,25)] * x_normalised[:, 13].unsqueeze(1)
+        x_normalised_clone[:, slice(25,28)] = x_normalised[:, slice(25,28)] * x_normalised[:, 1].unsqueeze(1) * x_normalised[:, 3].unsqueeze(1)
+        x_normalised_clone[:, slice(28,37)] = x_normalised[:, slice(28,37)] * x_normalised[:, 1].unsqueeze(1) * x_normalised[:, 4].unsqueeze(1) * x_normalised[:, 7].unsqueeze(1)
 
-        return x_normalised
 
-    # TODO: check if the input image is a tensor
+        return x_normalised_clone
+
     def forward(self, x):
         return self.model(x)
 
@@ -90,13 +94,10 @@ class AlexNetModel(LightningModule):
         train_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_training_rev1',
                                                      label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
-                                                     transform = transforms.Compose([   transforms.Resize(256),                    
-                                                                                        transforms.CenterCrop(224),                
-                                                                                        transforms.ToTensor(),                     
-                                                                                        transforms.Normalize(                      
-                                                                                        mean=[0.485, 0.456, 0.406],                
-                                                                                        std=[0.229, 0.224, 0.225]                  
-                                                                                        )]))
+                                                     transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                     centercrop=224, 
+                                                                                                     mean=[0.485, 0.456, 0.406], 
+                                                                                                     std=[0.229, 0.224, 0.225]))
                                                     #  transform = transforms.Compose([Preprocessing.DielemanTransformation(rotation_range=[0,360], 
                                                     #                                                                       translation_range=[4./424,4./424], 
                                                     #                                                                       scaling_range=[1/1.3,1.3], 
@@ -130,13 +131,10 @@ class AlexNetModel(LightningModule):
         validation_dataset = DataSets.GalaxyZooDataset(data_directory = '../data/KaggleGalaxyZoo/images_training_rev1',
                                                      label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
-                                                     transform = transforms.Compose([   transforms.Resize(256),                    
-                                                                                        transforms.CenterCrop(224),                
-                                                                                        transforms.ToTensor(),                     
-                                                                                        transforms.Normalize(                      
-                                                                                        mean=[0.485, 0.456, 0.406],                
-                                                                                        std=[0.229, 0.224, 0.225]                  
-                                                                                        )]))
+                                                     transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                     centercrop=224, 
+                                                                                                     mean=[0.485, 0.456, 0.406], 
+                                                                                                     std=[0.229, 0.224, 0.225]))
                                                     #  transform = transforms.Compose([Preprocessing.ViewpointTransformation(target_size=[45,45], crop_size=[69,69], downsampling_factor=3.0, rotation_angles=[0,45], add_flipped_viewport=True)]))
 
         # # Calculate the number of samples for validation
@@ -158,13 +156,10 @@ class AlexNetModel(LightningModule):
     def test_dataloader(self):
         testing_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_test_rev1',
                                                     extension = '.jpg',
-                                                    transform = transforms.Compose([   transforms.Resize(256),                    
-                                                                                        transforms.CenterCrop(224),                
-                                                                                        transforms.ToTensor(),                     
-                                                                                        transforms.Normalize(                      
-                                                                                        mean=[0.485, 0.456, 0.406],                
-                                                                                        std=[0.229, 0.224, 0.225]                  
-                                                                                        )]))
+                                                    transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                    centercrop=224, 
+                                                                                                    mean=[0.485, 0.456, 0.406], 
+                                                                                                    std=[0.229, 0.224, 0.225]))
                                                     # transform = transforms.Compose([
                                                     #     # Preprocessing.AffineTestTransformation(rotation_angles=[0, 36, 72, 108, 144, 180, 216, 252, 288, 324],
                                                     #     #                                                                    scalings=[1/1.2,1.0,1.2],
@@ -189,25 +184,25 @@ class AlexNetModel(LightningModule):
 
     def training_step(self, batch, batch_idx):
         # self.use_dropout = True
-        views = batch['images'].reshape(-1,3,45,45) #first 16 views of 1 image .. 16 views of 2 image and so on
+        views = batch['images'].reshape(-1,3,224,224)
         # Disable normaliser for the first 625 gradient steps
         if self.gradient_steps < 625:
             output = self.forward(views.to('cuda'))
         else:
             output = self.normaliser(views.to('cuda'))
-        #output = self.forward(views.to('cuda'))
+
         rmse = torch.sqrt(torch.mean(torch.square(output - batch['labels'].to('cuda')), axis=1))
         loss = torch.mean(rmse)
         self.log("train_loss", loss, on_step=True, prog_bar=True, logger=True)
        
         # Increment the gradient steps counter
-        #self.gradient_steps += 1
+        self.gradient_steps += 1
         
         return {'loss': loss}
     
     def validation_step(self, batch, batch_idx):
     # Reshape views
-        views = batch['images'].reshape(-1,3,45,45)
+        views = batch['images']
 
         # Forward pass
         output = self.normaliser(views.to('cuda'))
@@ -224,14 +219,8 @@ class AlexNetModel(LightningModule):
 
         return {'val_loss': loss}
 
-    
-    #test_set = set()
     def test_step(self, batch, batch_idx):
-        # self.use_dropout = False
-        #test_set.add(batch_idx)
-        # if batch_idx <4995:
-        #     return None
-        views = batch['images'].reshape(-1,3,45,45)
+        views = batch['images']
         output = self.normaliser(views.to('cuda'))
         #output = output.reshape(int(views.shape[0]/60/self.viewpoints), 60, 37)
         #output = torch.mean(output, axis=1)
@@ -264,17 +253,17 @@ checkpoint_callback = ModelCheckpoint(
 
     
 #testing  
-# if __name__ == '__main__':
-#     pl.seed_everything(123456)
-#     network = DielemannModel.load_from_checkpoint(checkpoint_path="AlexNet_model/last.ckpt",
-#                                                   hparams_file="lightning_logs/version_11/hparams.yaml",
-#     )
-#     trainer = Trainer(devices=1, accelerator="gpu")
-#     trainer.test(network, verbose=True) 
-
-#training
 if __name__ == '__main__':
     pl.seed_everything(123456)
-    network = AlexNetModel()#.load_from_checkpoint(checkpoint_path="val_model/model-epoch=368-train_loss=0.07.ckpt")
-    trainer = Trainer(max_epochs=100, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback]) #dielemann-> 452 epochs
-    trainer.fit(network)
+    network = AlexNetModel.load_from_checkpoint(checkpoint_path="AlexNet_model/model-epoch=69-train_loss=0.27.ckpt",
+                                                  hparams_file="lightning_logs/version_19/hparams.yaml",
+    )
+    trainer = Trainer(devices=1, accelerator="gpu")
+    trainer.test(network, verbose=True) 
+
+#training
+# if __name__ == '__main__':
+#     pl.seed_everything(123456)
+#     network = AlexNetModel()#.load_from_checkpoint(checkpoint_path="val_model/model-epoch=368-train_loss=0.07.ckpt")
+#     trainer = Trainer(max_epochs=100, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback]) #dielemann-> 452 epochs
+#     trainer.fit(network)

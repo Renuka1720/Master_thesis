@@ -21,6 +21,18 @@ class DielemanTransformation():
         x['images'] = self.flip.__call__(resize)
         return x
 
+class AlexnetTransformation():
+    def __init__(self, resize, centercrop, mean, std):
+        self.data_transform = transforms.Compose([  transforms.Resize(resize, antialias=False),
+                                                    transforms.CenterCrop(centercrop),
+                                                    transforms.Normalize(mean=mean, std=std)
+                                                    ])
+
+    def __call__(self, x):
+        x['images'] = self.data_transform.__call__(x['images'])
+        return x
+
+
 # TODO: add documentation, double check later
 class KrizhevskyColorTransformation():
     def __init__(self, weights, std):
