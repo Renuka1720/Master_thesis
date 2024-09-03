@@ -15,70 +15,98 @@ from pytorch_lightning import LightningModule
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import os
 
-# TODO: add documentation
-class DielemannModel(LightningModule):
-    def __init__(self):
-        super(DielemannModel, self).__init__()
 
-        self.batchsize=16 
-        self.viewpoints=16
-        #Output size after convolution filter = ((w-f+2P)/s) +1
-        self.gradient_steps = 0    # Counter for gradient steps
-
-        #Input shape= (16,3,45,45)
-
-        # Convolutional layers
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=6)
-        nn.init.normal_(self.conv1.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv1.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool1 = nn.MaxPool2d(kernel_size=2)
-
-        # Shape= (16,6,40,40)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5)
-        nn.init.normal_(self.conv2.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv2.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool2 = nn.MaxPool2d(kernel_size=2)
-
-        # Convolutional layers
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3)
-        nn.init.normal_(self.conv3.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv3.bias, 0.1)
-
-        self.conv4 = nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3)
-        nn.init.normal_(self.conv4.weight, mean=0, std=0.1)
-        nn.init.constant_(self.conv4.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool3 = nn.MaxPool2d(kernel_size=2)
-
-        # Fully connected layers (or) dense layers
-        # self.use_dropout = False
-
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(in_features= 8192, out_features= 4096)
-        nn.init.normal_(self.fc1.weight, mean=0, std=0.001)
-        nn.init.constant_(self.fc1.bias, 0.01)
-
-        self.maxpool4 = nn.MaxPool1d(kernel_size=2)
-
-        self.dropout2 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(in_features= 2048, out_features= 4096)
-        nn.init.normal_(self.fc2.weight, mean=0, std=0.001)
-        nn.init.constant_(self.fc2.bias, 0.01)
-
-        self.maxpool5 = nn.MaxPol1d(kernel_size=2)
-
-        self.dropout3 = nn.Dropout(0.5)
-        self.fc3 = nn.Linear(in_features= 2048, out_features= 37)
-        nn.init.normal_(self.fc3.weight, mean=0, std=0.01)
-        nn.init.constant_(self.fc3.bias, 0.1)
-
-        # Rectification non-linearity (ReLU)
+class block(LightningModule):
+    def __init__(
+        self, in_channels, intermediate_channels, identity_downsample=None, stride=1
+    ):
+        super().__init__()
+        self.expansion = 4
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            intermediate_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(intermediate_channels)
+        self.conv2 = nn.Conv2d(
+            intermediate_channels,
+            intermediate_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(intermediate_channels)
+        self.conv3 = nn.Conv2d(
+            intermediate_channels,
+            intermediate_channels * self.expansion,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=False,
+        )
+        self.bn3 = nn.BatchNorm2d(intermediate_channels * self.expansion)
         self.relu = nn.ReLU()
+        self.identity_downsample = identity_downsample
+        self.stride = stride
+
+    def forward(self, x):
+        identity = x.clone()
+
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        x = self.conv3(x)
+        x = self.bn3(x)
+
+        if self.identity_downsample is not None:
+            identity = self.identity_downsample(identity)
+
+        x += identity
+        x = self.relu(x)
+        return x
+
+
+class ResNet(LightningModule):
+    def __init__(self, block, layers, image_channels, num_classes):
+        super(ResNet, self).__init__()
+        self.in_channels = 64
+        self.conv1 = nn.Conv2d(
+            image_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU()
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # Essentially the entire ResNet architecture are in these 4 lines below
+        self.layer1 = self._make_layer(
+            block, layers[0], intermediate_channels=64, stride=1
+        )
+        self.layer2 = self._make_layer(
+            block, layers[1], intermediate_channels=128, stride=2
+        )
+        self.layer3 = self._make_layer(
+            block, layers[2], intermediate_channels=256, stride=2
+        )
+        self.layer4 = self._make_layer(
+            block, layers[3], intermediate_channels=512, stride=2
+        )
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * 4, num_classes)
+        
+        self.batchsize=16
+        self.viewpoints=16
+        self.gradient_steps = 0    # Counter for gradient steps
+        self.relu = nn.ReLU()
+
+        #initializing the variables needed for divisive normalisation
         self.question_slices = [slice(0, 3), slice(3, 5), slice(5, 7), slice(7, 9), slice(9, 13), slice(13, 15),
                                 slice(15, 18), slice(18, 25), slice(25, 28), slice(28, 31), slice(31, 37)]
 
@@ -93,6 +121,7 @@ class DielemannModel(LightningModule):
             (slice(28, 37), 7),
         ]
 
+    #defining the methods needed for divisive normalisation
     def generate_normalisation_mask(self):
         mask = torch.zeros(37, 37).to('cuda')
         for s in self.question_slices:
@@ -113,40 +142,55 @@ class DielemannModel(LightningModule):
         return x_normalised_clone
 
     def forward(self, x):
-        # Convolutional layers Shape= (batchsize*16,3,45,45)
-        x = self.conv1(x)  # Shape= (batchsize*16,32,40,40)
+        x = self.conv1(x)
+        x = self.bn1(x)
         x = self.relu(x)
-        x = self.maxpool1(x) #Shape= (batchsize*16,32,20,20)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
 
-        x = self.conv2(x)  #Shape= (batchsize*16,64,16,16)
-        x = self.relu(x)
-        x = self.maxpool2(x)  #Shape= (batchsize*16,64,8,8)
-
-        x = self.conv3(x)    #Shape= (batchsize*16,128,6,6)
-        x = self.relu(x)
-
-        x = self.conv4(x)   #Shape= (batchsize*16,128,4,4)
-        x = self.relu(x)
-        x = self.maxpool3(x)  #Shape= (batchsize*16,128,2,2)
-
-        # Flattening the feature maps
-        x = x.view(-1, self.viewpoints*512)   #2d tensor of shape= (batchsize, 16*128*2*2 = 512*16=8192) #(16, 8192)
-
-        # Fully connected layers
-        # Dropout is disabled by default in PyTorch Lightning during testing. Therefore, it is not necessary to manually turn it off each time you test.
-
-        x = self.dropout1(x)
-        x = self.fc1(x)
-        x = self.maxpool4(x)
-
-        x = self.dropout2(x)
-        x = self.fc2(x)
-        x = self.maxpool5(x)
-
-        x = self.dropout3(x)
-        x = self.fc3(x)
+        x = self.avgpool(x)
+        x = x.reshape(x.shape[0], -1)
+        x = self.fc(x)
 
         return x
+
+    def _make_layer(self, block, num_residual_blocks, intermediate_channels, stride):
+        identity_downsample = None
+        layers = []
+
+        # Either if we half the input space for ex, 56x56 -> 28x28 (stride=2), or channels changes
+        # we need to adapt the Identity (skip connection) so it will be able to be added
+        # to the layer that's ahead
+        if stride != 1 or self.in_channels != intermediate_channels * 4:
+            identity_downsample = nn.Sequential(
+                nn.Conv2d(
+                    self.in_channels,
+                    intermediate_channels * 4,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(intermediate_channels * 4),
+            )
+
+        layers.append(
+            block(self.in_channels, intermediate_channels, identity_downsample, stride)
+        )
+
+        # The expansion size is always 4 for ResNet 50,101,152
+        self.in_channels = intermediate_channels * 4
+
+        # For example for first resnet layer: 256 will be mapped to 64 as intermediate layer,
+        # then finally back to 256. Hence no identity downsample is needed, since stride = 1,
+        # and also same amount of channels.
+        for i in range(num_residual_blocks - 1):
+            layers.append(block(self.in_channels, intermediate_channels))
+
+        return nn.Sequential(*layers)
+
 
     def normaliser(self, x):
         return self.calculate_normalized_outputs(self.forward(x))
@@ -304,14 +348,15 @@ class DielemannModel(LightningModule):
 
 checkpoint_callback = ModelCheckpoint(
     monitor='train_loss',
-    dirpath='Dieleman_check',
+    dirpath='scratch_resnet',
     filename='model-{epoch:02d}-{train_loss:.2f}',
     save_top_k=1,
     mode='min',
     save_last=True
 )   
 
-
+def ResNet50(img_channel=3, num_classes=37):
+    return ResNet(block, [3, 4, 6, 3], img_channel, num_classes)
     
 #testing  
 # if __name__ == '__main__':
@@ -324,11 +369,12 @@ checkpoint_callback = ModelCheckpoint(
 
 #training
 if __name__ == '__main__':
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     #global seed for reproducibility of results across multiple function calls
     pl.seed_everything(123456)
     # instance of the DielemannModel
-    network = DielemannModel()#.load_from_checkpoint(checkpoint_path="val_model/model-epoch=368-train_loss=0.07.ckpt")
+    network = ResNet50(img_channel=3, num_classes=37)#.load_from_checkpoint(checkpoint_path="val_model/model-epoch=368-train_loss=0.07.ckpt")
     # Initializing the trainer object
-    trainer = Trainer(max_epochs=406, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
+    trainer = Trainer(max_epochs=500, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
     #Starting the training process using the Trainer
     trainer.fit(network)

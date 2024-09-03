@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as transforms
+import torchvision.models as models
 from torch.optim.lr_scheduler import MultiStepLR
 torch.autograd.set_detect_anomaly(True)
 
@@ -15,70 +16,42 @@ from pytorch_lightning import LightningModule
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import os
 
-# TODO: add documentation
-class DielemannModel(LightningModule):
+class ResNetTransferLearning(LightningModule):
     def __init__(self):
-        super(DielemannModel, self).__init__()
+        super().__init__()
 
-        self.batchsize=16 
-        self.viewpoints=16
-        #Output size after convolution filter = ((w-f+2P)/s) +1
-        self.gradient_steps = 0    # Counter for gradient steps
-
-        #Input shape= (16,3,45,45)
-
-        # Convolutional layers
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=6)
-        nn.init.normal_(self.conv1.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv1.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool1 = nn.MaxPool2d(kernel_size=2)
-
-        # Shape= (16,6,40,40)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5)
-        nn.init.normal_(self.conv2.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv2.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool2 = nn.MaxPool2d(kernel_size=2)
-
-        # Convolutional layers
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3)
-        nn.init.normal_(self.conv3.weight, mean=0, std=0.01)
-        nn.init.constant_(self.conv3.bias, 0.1)
-
-        self.conv4 = nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3)
-        nn.init.normal_(self.conv4.weight, mean=0, std=0.1)
-        nn.init.constant_(self.conv4.bias, 0.1)
-
-        # Max-pooling layer
-        self.maxpool3 = nn.MaxPool2d(kernel_size=2)
-
-        # Fully connected layers (or) dense layers
-        # self.use_dropout = False
-
+        #initializing resnet50 feature extractor
+        backbone = models.resnet50(weights=None)
+        num_filters = backbone.fc.in_features
+        layers = list(backbone.children())[:-1]
+        self.feature_extractor = nn.Sequential(*layers)
+        #self.feature_extractor.eval()
+        
+        #initializing Dieleman classifier
         self.dropout1 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(in_features= 8192, out_features= 4096)
+        self.fc1 = nn.Linear(num_filters, out_features=4096)
         nn.init.normal_(self.fc1.weight, mean=0, std=0.001)
         nn.init.constant_(self.fc1.bias, 0.01)
 
         self.maxpool4 = nn.MaxPool1d(kernel_size=2)
 
         self.dropout2 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(in_features= 2048, out_features= 4096)
+        self.fc2 = nn.Linear(in_features=2048, out_features=4096)
         nn.init.normal_(self.fc2.weight, mean=0, std=0.001)
         nn.init.constant_(self.fc2.bias, 0.01)
 
-        self.maxpool5 = nn.MaxPol1d(kernel_size=2)
+        self.maxpool5 = nn.MaxPool1d(kernel_size=2)
 
         self.dropout3 = nn.Dropout(0.5)
-        self.fc3 = nn.Linear(in_features= 2048, out_features= 37)
+        self.fc3 = nn.Linear(in_features=2048, out_features=37)
         nn.init.normal_(self.fc3.weight, mean=0, std=0.01)
         nn.init.constant_(self.fc3.bias, 0.1)
 
-        # Rectification non-linearity (ReLU)
+        self.batchsize=256
+        self.gradient_steps = 0    # Counter for gradient steps
         self.relu = nn.ReLU()
+
+        #initializing the variables needed for divisive normalisation
         self.question_slices = [slice(0, 3), slice(3, 5), slice(5, 7), slice(7, 9), slice(9, 13), slice(13, 15),
                                 slice(15, 18), slice(18, 25), slice(25, 28), slice(28, 31), slice(31, 37)]
 
@@ -93,6 +66,7 @@ class DielemannModel(LightningModule):
             (slice(28, 37), 7),
         ]
 
+    #defining the methods needed for divisive normalisation
     def generate_normalisation_mask(self):
         mask = torch.zeros(37, 37).to('cuda')
         for s in self.question_slices:
@@ -111,31 +85,11 @@ class DielemannModel(LightningModule):
         x_normalised_clone[:, slice(25,28)] = x_normalised[:, slice(25,28)] * x_normalised[:, 1].unsqueeze(1) * x_normalised[:, 3].unsqueeze(1)
         x_normalised_clone[:, slice(28,37)] = x_normalised[:, slice(28,37)] * x_normalised[:, 1].unsqueeze(1) * x_normalised[:, 4].unsqueeze(1) * x_normalised[:, 7].unsqueeze(1)
         return x_normalised_clone
-
+       
     def forward(self, x):
-        # Convolutional layers Shape= (batchsize*16,3,45,45)
-        x = self.conv1(x)  # Shape= (batchsize*16,32,40,40)
-        x = self.relu(x)
-        x = self.maxpool1(x) #Shape= (batchsize*16,32,20,20)
-
-        x = self.conv2(x)  #Shape= (batchsize*16,64,16,16)
-        x = self.relu(x)
-        x = self.maxpool2(x)  #Shape= (batchsize*16,64,8,8)
-
-        x = self.conv3(x)    #Shape= (batchsize*16,128,6,6)
-        x = self.relu(x)
-
-        x = self.conv4(x)   #Shape= (batchsize*16,128,4,4)
-        x = self.relu(x)
-        x = self.maxpool3(x)  #Shape= (batchsize*16,128,2,2)
-
-        # Flattening the feature maps
-        x = x.view(-1, self.viewpoints*512)   #2d tensor of shape= (batchsize, 16*128*2*2 = 512*16=8192) #(16, 8192)
-
-        # Fully connected layers
-        # Dropout is disabled by default in PyTorch Lightning during testing. Therefore, it is not necessary to manually turn it off each time you test.
-
-        x = self.dropout1(x)
+        #with torch.no_grad():
+        representations = self.feature_extractor(x).flatten(1)
+        x = self.dropout1(representations)
         x = self.fc1(x)
         x = self.maxpool4(x)
 
@@ -147,6 +101,7 @@ class DielemannModel(LightningModule):
         x = self.fc3(x)
 
         return x
+    
 
     def normaliser(self, x):
         return self.calculate_normalized_outputs(self.forward(x))
@@ -161,7 +116,7 @@ class DielemannModel(LightningModule):
         num_images = len(full_dataset)
         split_point = int(0.99 * num_images)  # Point to split the dataset
 
-        # Using the first 90% of the images for training, and the last 10% for validation
+        # Use the first 99% of the images for training, and the last 1% for validation
         self.train_indices = list(range(0, split_point))
         self.val_indices = list(range(split_point, num_images))
 
@@ -169,31 +124,21 @@ class DielemannModel(LightningModule):
         '''
         This function returns the training dataloader with preprocessed data.
         '''
-        # Defining the train dataset with preprocessing transformations
         train_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_training_rev1',
                                                      label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
-                                                     transform = transforms.Compose([Preprocessing.DielemanTransformation(rotation_range=[0,360], 
-                                                                                                                          translation_range=[4./424,4./424], 
-                                                                                                                          scaling_range=[1/1.3,1.3], 
-                                                                                                                          flip=0.5),
-                                                                                     Preprocessing.KrizhevskyColorTransformation(weights=[-0.0148366, -0.01253134, -0.01040762], 
-                                                                                                                                 std=0.5),
-                                                                                     Preprocessing.ViewpointTransformation(target_size=[45,45], 
-                                                                                                                           crop_size=[69,69], 
-                                                                                                                           downsampling_factor=3.0, 
-                                                                                                                           rotation_angles=[0,45], 
-                                                                                                                           add_flipped_viewport=True)]))
-        
+                                                     transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                     centercrop=224, 
+                                                                                                     mean=[0.485, 0.456, 0.406], 
+                                                                                                     std=[0.229, 0.224, 0.225]))
+    
         # training data subset
         training_dataset = Subset(train_dataset, self.train_indices)
         
         training_dataloader = DataLoader(training_dataset,
-                                      batch_size=self.batchsize,
-                                      shuffle=True,
-                                      num_workers=48)
-       # a, b = next(iter(training_dataloader))
-       # print(a.shape, b.shape)
+                                        batch_size=self.batchsize,
+                                        shuffle=True,
+                                        num_workers=48)
         return training_dataloader
 
     
@@ -201,24 +146,28 @@ class DielemannModel(LightningModule):
         validation_dataset = DataSets.GalaxyZooDataset(data_directory = '../data/KaggleGalaxyZoo/images_training_rev1',
                                                      label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
-                                                     transform = transforms.Compose([Preprocessing.ViewpointTransformation(target_size=[45,45], crop_size=[69,69], downsampling_factor=3.0, rotation_angles=[0,45], add_flipped_viewport=True)]))
+                                                     transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                     centercrop=224, 
+                                                                                                     mean=[0.485, 0.456, 0.406], 
+                                                                                                     std=[0.229, 0.224, 0.225]))
         
         val_dataset = Subset(validation_dataset, self.val_indices)
-        validation_dataloader = DataLoader(val_dataset,
-                                    batch_size=self.batchsize,
-                                    shuffle=False,
-                                    num_workers=48)
+        
+        validation_dataloader = DataLoader( val_dataset,
+                                            batch_size=self.batchsize,
+                                            shuffle=False,
+                                            num_workers=48)
         return validation_dataloader
 
 
     def test_dataloader(self):
         testing_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_test_rev1',
                                                     extension = '.jpg',
-                                                    transform = transforms.Compose([Preprocessing.ViewpointTransformation(target_size=[45,45], 
-                                                                                                                          crop_size=[69,69], 
-                                                                                                                          downsampling_factor=3.0, 
-                                                                                                                          rotation_angles=[0,45], 
-                                                                                                                          add_flipped_viewport=True)]))
+                                                    transform = Preprocessing.AlexnetTransformation(resize=256, 
+                                                                                                    centercrop=224, 
+                                                                                                    mean=[0.485, 0.456, 0.406], 
+                                                                                                    std=[0.229, 0.224, 0.225]))
+                                
         testing_dataloader = DataLoader(testing_dataset,
                                         batch_size=self.batchsize,
                                         num_workers=48,
@@ -230,8 +179,8 @@ class DielemannModel(LightningModule):
         '''
         This function sets up the optimizer and learning rate scheduler.
         '''
-        optimizer = torch.optim.SGD(self.parameters(), lr=0.04, momentum=0.9, nesterov=True)
-        scheduler = MultiStepLR(optimizer, milestones=[286, 364], gamma=0.1) # 18mio images and 23mio images [325, 415]
+        optimizer = torch.optim.SGD(self.parameters(), lr=0.03, momentum=0.9, nesterov=True)
+        scheduler = MultiStepLR(optimizer, milestones=[30, 65], gamma=0.1) 
         return {'optimizer': optimizer,
                 'lr_scheduler': scheduler}
 
@@ -239,22 +188,18 @@ class DielemannModel(LightningModule):
         '''
         This function performs a single training step.
         '''
-        views = batch['images'].reshape(-1,3,45,45) #first 16 views of 1 image .. 16 views of 2 image and so on
-        # Forward pass
-        # Disable normaliser for the first 625 gradient steps
+        views = batch['images'].reshape(-1,3,224,224)
+        # Disabling normaliser for the first 625 gradient steps as per Dieleman's paper
         if self.gradient_steps < 625:
             output = self.forward(views.to('cuda'))
         else:
             output = self.normaliser(views.to('cuda'))
-        
-        #Computing RMSE for each sample in the batch
+
         rmse = torch.sqrt(torch.mean(torch.square(output - batch['labels'].to('cuda')), axis=1))
-        #computes the mean of the RMSE values across the batch, resulting in a single scalar value representing the average RMSE loss across the batch
-        loss = torch.mean(rmse)
-        #logging the training loss
-        self.log("train_loss", loss, on_step=True, prog_bar=True, logger=True)
+        loss = torch.mean(rmse)   #average RMSE loss across the batch
+        self.log("train_loss", loss, on_step=True, prog_bar=True, logger=True, batch_size= 256)
        
-        # Increment the gradient steps counter
+        # Incrementing the gradient steps counter
         self.gradient_steps += 1
         
         return {'loss': loss}
@@ -263,27 +208,18 @@ class DielemannModel(LightningModule):
         '''
         This function performs a single validation step.
         '''
-    # Reshaping views
-        views = batch['images'].reshape(-1,3,45,45)
-
-        # Forward pass
+        views = batch['images'].reshape(-1,3,224,224)
         output = self.normaliser(views.to('cuda'))
-        # Computing RMSE
         rmse = torch.sqrt(torch.mean(torch.square(output - batch['labels'].to('cuda')), axis=1))
-        # loss
         loss = torch.mean(rmse)
-
-        # Log the validation loss
         self.log("val_loss", loss, on_step=True, prog_bar=True, logger=True)
-
         return {'val_loss': loss}
 
-    
     def test_step(self, batch, batch_idx):
         '''
         This function performs a single testing step.
         '''
-        views = batch['images'].reshape(-1,3,45,45)
+        views = batch['images'].reshape(-1,3,224,224)
         output = self.normaliser(views.to('cuda'))
         output = torch.clip(output, min=0, max=1)
 
@@ -304,7 +240,7 @@ class DielemannModel(LightningModule):
 
 checkpoint_callback = ModelCheckpoint(
     monitor='train_loss',
-    dirpath='Dieleman_check',
+    dirpath='trial',
     filename='model-{epoch:02d}-{train_loss:.2f}',
     save_top_k=1,
     mode='min',
@@ -316,19 +252,20 @@ checkpoint_callback = ModelCheckpoint(
 #testing  
 # if __name__ == '__main__':
 #     pl.seed_everything(123456)
-#     network = DielemannModel.load_from_checkpoint(checkpoint_path="Dieleman_check/model-epoch=392-train_loss=0.02.ckpt",
-#                                                   hparams_file="lightning_logs/version_18/hparams.yaml",
+#     network = ResNetTransferLearning.load_from_checkpoint(checkpoint_path="resnet50_dielemann_fc/model-epoch=24-train_loss=0.11.ckpt",
+#                                                   hparams_file="lightning_logs/resnet50_dielemann/hparams.yaml",
 #     )
+#     network.freeze()
 #     trainer = Trainer(devices=1, accelerator="gpu")
 #     trainer.test(network, verbose=True) 
 
 #training
 if __name__ == '__main__':
-    #global seed for reproducibility of results across multiple function calls
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     pl.seed_everything(123456)
-    # instance of the DielemannModel
-    network = DielemannModel()#.load_from_checkpoint(checkpoint_path="val_model/model-epoch=368-train_loss=0.07.ckpt")
-    # Initializing the trainer object
-    trainer = Trainer(max_epochs=406, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
-    #Starting the training process using the Trainer
+    network = ResNetTransferLearning()
+    trainer = Trainer(max_epochs=80, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
     trainer.fit(network)
+    
+
+    

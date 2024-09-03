@@ -154,8 +154,8 @@ class ResNetTransferLearning(LightningModule):
         '''
         This function sets up the optimizer and learning rate scheduler.
         '''
-        optimizer = torch.optim.SGD(self.parameters(), lr=0.04, momentum=0.9, nesterov=True)
-        scheduler = MultiStepLR(optimizer, milestones=[40, 85], gamma=0.1) 
+        optimizer = torch.optim.SGD(self.parameters(), lr=0.03, momentum=0.9, nesterov=True)
+        scheduler = MultiStepLR(optimizer, milestones=[30, 65], gamma=0.1) 
         return {'optimizer': optimizer,
                 'lr_scheduler': scheduler}
 
@@ -225,20 +225,21 @@ checkpoint_callback = ModelCheckpoint(
 
     
 #testing  
-# if __name__ == '__main__':
-#     pl.seed_everything(123456)
-#     network = AlexNetModel.load_from_checkpoint(checkpoint_path="AlexNet_model/model-epoch=69-train_loss=0.27.ckpt",
-#                                                   hparams_file="lightning_logs/version_19/hparams.yaml",
-#     )
-#     trainer = Trainer(devices=1, accelerator="gpu")
-#     trainer.test(network, verbose=True) 
-
-#training
 if __name__ == '__main__':
     pl.seed_everything(123456)
-    network = ResNetTransferLearning()
-    trainer = Trainer(max_epochs=90, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
-    trainer.fit(network)
+    network = ResNetTransferLearning.load_from_checkpoint(checkpoint_path="resnet50/model-epoch=38-train_loss=0.09.ckpt",
+                                                  hparams_file="lightning_logs/resnet50/hparams.yaml",
+    )
+    network.freeze()
+    trainer = Trainer(devices=1, accelerator="gpu")
+    trainer.test(network, verbose=True) 
+
+#training
+# if __name__ == '__main__':
+#     pl.seed_everything(123456)
+#     network = ResNetTransferLearning()
+#     trainer = Trainer(max_epochs=80, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
+#     trainer.fit(network)
     
 
     

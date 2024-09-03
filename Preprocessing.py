@@ -32,6 +32,20 @@ class AlexnetTransformation():
         x['images'] = self.data_transform.__call__(x['images'])
         return x
 
+# class Vgg16Transformation():
+#     def __init__(self, resize, centercrop, mean, std):
+#         self.data_transform = transforms.Compose([
+#                                                     transforms.Resize((224, 224)),
+#                                                     transforms.RandomHorizontalFlip(),
+#                                                     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.1),
+#                                                     transforms.RandomAffine(degrees=40, translate=None, scale=(1, 2), shear=15, resample=False, fillcolor=0),
+#                                                     transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+#                                                  ])
+
+
+    # def __call__(self, x):
+    #     x['images'] = self.data_transform.__call__(x['images'])
+    #     return x
 
 # TODO: add documentation, double check later
 class KrizhevskyColorTransformation():
