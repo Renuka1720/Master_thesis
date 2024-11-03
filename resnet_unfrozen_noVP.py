@@ -8,13 +8,17 @@ from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as transforms
 import torchvision.models as models
 from torch.optim.lr_scheduler import MultiStepLR
-torch.autograd.detect_anomaly(check_nan=True)
+#torch.autograd.detect_anomaly(check_nan=True)
 
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning import LightningModule
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, LearningRateFinder
+
 import os
+import time
+
 
 class ResNetTransferLearning(LightningModule):
     def __init__(self):
@@ -29,31 +33,15 @@ class ResNetTransferLearning(LightningModule):
         #self.feature_extractor.eval()
         for param in self.feature_extractor.parameters():
             param.requires_grad = True
-        
-        #initializing Dieleman classifier
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(in_features=32768, out_features=4096)
-        nn.init.normal_(self.fc1.weight, mean=0, std=0.001)
-        nn.init.constant_(self.fc1.bias, 0.01)
+    
+        self.fc1 = nn.Linear(in_features=2048, out_features=37)
 
-        self.maxpool4 = nn.MaxPool1d(kernel_size=2)
-
-        self.dropout2 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(in_features=2048, out_features=4096)
-        nn.init.normal_(self.fc2.weight, mean=0, std=0.001)
-        nn.init.constant_(self.fc2.bias, 0.01)
-
-        self.maxpool5 = nn.MaxPool1d(kernel_size=2)
-
-        self.dropout3 = nn.Dropout(0.5)
-        self.fc3 = nn.Linear(in_features=2048, out_features=37)
-        nn.init.normal_(self.fc3.weight, mean=0, std=0.01)
-        nn.init.constant_(self.fc3.bias, 0.1)
-
-        self.batchsize=16
-        self.viewpoints=16
+        self.batchsize=128
+        self.save_hyperparameters()
+        #self.viewpoints=16
         self.gradient_steps = 0    # Counter for gradient steps
         self.relu = nn.ReLU()
+
 
         #initializing the variables needed for divisive normalisation
         self.question_slices = [slice(0, 3), slice(3, 5), slice(5, 7), slice(7, 9), slice(9, 13), slice(13, 15),
@@ -95,17 +83,8 @@ class ResNetTransferLearning(LightningModule):
         #x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)       #(batchsize*16,3,224,224)
         #with torch.no_grad():
         x = self.feature_extractor(x)                 #rep shape(batchsize*16,2048,1,1)
-        x = x.view(-1, 32768)#(-1, self.viewpoints*2048)  #2d tensor of shape= (batchsize, self.viewpoints*2048*1*1 = 2048)
-        x = self.dropout1(x)
+        x = x.view(-1, 2048)#(-1, self.viewpoints*2048)  #2d tensor of shape= (batchsize, self.viewpoints*2048*1*1 = 2048)
         x = self.fc1(x)
-        x = self.maxpool4(x)
-
-        x = self.dropout2(x)
-        x = self.fc2(x)
-        x = self.maxpool5(x)
-
-        x = self.dropout3(x)
-        x = self.fc3(x)
         return x
     
 
@@ -114,8 +93,8 @@ class ResNetTransferLearning(LightningModule):
 
     def prepare_data(self):
         full_dataset = DataSets.GalaxyZooDataset(
-            data_directory='../data/KaggleGalaxyZoo/images_training_rev1',
-            label_file='../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
+            data_directory='/local_data/AIN/Renuka/KaggleGalaxyZoo/images_training_rev1',
+            label_file='/local_data/AIN/Renuka/KaggleGalaxyZoo/training_solutions_rev1.csv',
             extension='.jpg',
         )
 
@@ -131,7 +110,7 @@ class ResNetTransferLearning(LightningModule):
         This function returns the training dataloader with preprocessed data.
         '''
         train_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_training_rev1',
-                                                     label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
+                                                     label_file = '/local_data/AIN/Renuka/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
                                                      transform = transforms.Compose([Preprocessing.DielemanTransformation(rotation_range=[0,360], 
                                                                                                                           translation_range=[4./424,4./424], 
@@ -139,11 +118,7 @@ class ResNetTransferLearning(LightningModule):
                                                                                                                           flip=0.5),
                                                                                      Preprocessing.KrizhevskyColorTransformation(weights=[-0.0148366, -0.01253134, -0.01040762], 
                                                                                                                                  std=0.5),
-                                                                                     Preprocessing.ViewpointTransformation(target_size=[45,45], 
-                                                                                                                           crop_size=[69,69], 
-                                                                                                                           downsampling_factor=3.0, 
-                                                                                                                           rotation_angles=[0,45], 
-                                                                                                                           add_flipped_viewport=True)])) 
+                                                                                     Preprocessing.NoViewpointTransformation(output_size= [69,69], downsampling_factor=3.0)])) 
                                                                                                                 
         # training data subset
         training_dataset = Subset(train_dataset, self.train_indices)
@@ -151,26 +126,22 @@ class ResNetTransferLearning(LightningModule):
         training_dataloader = DataLoader(training_dataset,
                                         batch_size=self.batchsize,
                                         shuffle=True,
-                                        num_workers=48)
+                                        num_workers=48, persistent_workers=True)
         return training_dataloader
 
     
     def val_dataloader(self):
-        validation_dataset = DataSets.GalaxyZooDataset(data_directory = '../data/KaggleGalaxyZoo/images_training_rev1',
-                                                     label_file = '../data/KaggleGalaxyZoo/training_solutions_rev1.csv',
+        validation_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_training_rev1',
+                                                     label_file = '/local_data/AIN/Renuka/KaggleGalaxyZoo/training_solutions_rev1.csv',
                                                      extension = '.jpg',
-                                                     transform = transforms.Compose([Preprocessing.ViewpointTransformation(target_size=[45,45], 
-                                                                                                                           crop_size=[69,69], 
-                                                                                                                           downsampling_factor=3.0, 
-                                                                                                                           rotation_angles=[0,45], 
-                                                                                                                           add_flipped_viewport=True)])) 
+                                                     transform = transforms.Compose([Preprocessing.NoViewpointTransformation(output_size= [69,69], downsampling_factor=3.0)])) 
         
 
         val_dataset = Subset(validation_dataset, self.val_indices)
         
         validation_dataloader = DataLoader( val_dataset,
                                             batch_size=self.batchsize,
-                                            shuffle=False,
+                                            shuffle=True,
                                             num_workers=48)
         return validation_dataloader
 
@@ -178,15 +149,11 @@ class ResNetTransferLearning(LightningModule):
     def test_dataloader(self):
         testing_dataset = DataSets.GalaxyZooDataset(data_directory = '/local_data/AIN/Renuka/KaggleGalaxyZoo/images_test_rev1',
                                                     extension = '.jpg',
-                                                    transform = transforms.Compose([Preprocessing.ViewpointTransformation(target_size=[45,45], 
-                                                                                                                           crop_size=[69,69], 
-                                                                                                                           downsampling_factor=3.0, 
-                                                                                                                           rotation_angles=[0,45], 
-                                                                                                                           add_flipped_viewport=True)]))
+                                                    transform = transforms.Compose([Preprocessing.NoViewpointTransformation(output_size= [69,69], downsampling_factor=3.0)]))
       
         testing_dataloader = DataLoader(testing_dataset,
                                         batch_size=self.batchsize,
-                                        num_workers=48,
+                                        num_workers=8,
                                         shuffle=False)
         return testing_dataloader
     
@@ -195,8 +162,8 @@ class ResNetTransferLearning(LightningModule):
         '''
         This function sets up the optimizer and learning rate scheduler.
         '''
-        optimizer = torch.optim.SGD(self.parameters(), lr=0.04, momentum=0.9, nesterov=True)
-        scheduler = MultiStepLR(optimizer, milestones=[286, 364], gamma=0.1) # 18mio images and 23mio images [325, 415]
+        optimizer = torch.optim.SGD(self.parameters(), lr=0.001, momentum=0.9, nesterov=True)
+        scheduler = MultiStepLR(optimizer, milestones=[20000, 36000], gamma=0.1) # 18mio images and 23mio images [325, 415]
         #scheduler = MultiStepLR(optimizer, milestones=[30, 65], gamma=0.1) 
         return {'optimizer': optimizer,
                 'lr_scheduler': scheduler}
@@ -205,7 +172,7 @@ class ResNetTransferLearning(LightningModule):
         '''
         This function performs a single training step.
         '''
-        views = batch['images'].reshape(-1,3,45,45)
+        views = batch['images'].reshape(-1,3,69,69)
         # Disabling normaliser for the first 625 gradient steps as per Dieleman's paper
         if self.gradient_steps < 625:
             output = self.forward(views.to('cuda'))
@@ -214,7 +181,7 @@ class ResNetTransferLearning(LightningModule):
 
         rmse = torch.sqrt(torch.mean(torch.square(output - batch['labels'].to('cuda')), axis=1))
         loss = torch.mean(rmse)   #average RMSE loss across the batch
-        self.log("train_loss", loss, on_step=True, prog_bar=True, logger=True, batch_size= self.batchsize)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size= self.batchsize)
        
         # Incrementing the gradient steps counter
         self.gradient_steps += 1
@@ -225,7 +192,7 @@ class ResNetTransferLearning(LightningModule):
         '''
         This function performs a single validation step.
         '''
-        views = batch['images'].reshape(-1,3,45,45) #(-1,3,45,45)
+        views = batch['images'].reshape(-1,3,69,69) #(-1,3,45,45)
         output = self.normaliser(views.to('cuda'))
         rmse = torch.sqrt(torch.mean(torch.square(output - batch['labels'].to('cuda')), axis=1))
         loss = torch.mean(rmse)
@@ -236,7 +203,7 @@ class ResNetTransferLearning(LightningModule):
         '''
         This function performs a single testing step.
         '''
-        views = batch['images'].reshape(-1,3,45,45)
+        views = batch['images'].reshape(-1,3,69,69)
         output = self.normaliser(views.to('cuda'))
         output = torch.clip(output, min=0, max=1)
 
@@ -257,21 +224,22 @@ class ResNetTransferLearning(LightningModule):
 
 checkpoint_callback = ModelCheckpoint(
     monitor='val_loss',
-    dirpath='resnet_please',
-    filename='model-{epoch:02d}-{val_loss:.2f}',
+    dirpath='/local_data/AIN/Renuka/checkpoints/resnet_no_VP',
+    filename='model-{epoch:02d}-{train_loss:.2f}',
     save_top_k=1,
-    #every_n_epochs= 100,
+    every_n_epochs= 100,
     mode='min',
     save_last=True
 )   
 
+wandb_logger = WandbLogger(project="my_project_name")
 
     
 #testing  
 # if __name__ == '__main__':
 #     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 #     pl.seed_everything(123456)
-#     network = ResNetTransferLearning.load_from_checkpoint(checkpoint_path="resnet_unfrozen_16x/model-epoch=143-train_loss=0.03.ckpt",
+#     network = ResNetTransferLearning.load_from_checkpoint(checkpoint_path="/local_data/AIN/Renuka/checkpoints/resnet_no_VP/model-epoch=1799-train_loss=0.07.ckpt",
 #     )
 #     #network.freeze()
 #     trainer = Trainer(devices=1, accelerator="gpu")
@@ -279,11 +247,19 @@ checkpoint_callback = ModelCheckpoint(
 
 #training
 if __name__ == '__main__':
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     pl.seed_everything(123456)
     network = ResNetTransferLearning()
-    trainer = Trainer(max_epochs=600, devices=1, accelerator="gpu", callbacks=[LearningRateMonitor(logging_interval='step'), checkpoint_callback])
-    trainer.fit(network) #ckpt_path= "resnet_unfrozen_16x/model-epoch=143-train_loss=0.03.ckpt")
+    trainer = Trainer(
+            max_epochs=50000, 
+            devices=1, 
+            accelerator="gpu", 
+            check_val_every_n_epoch=10, 
+            logger=wandb_logger,
+            callbacks=[LearningRateMonitor(logging_interval='step'),
+            checkpoint_callback]
+                        )
+    trainer.fit(network) 
     
 
     

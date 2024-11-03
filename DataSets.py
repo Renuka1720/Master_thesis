@@ -7,8 +7,13 @@ import torch
 
 # TODO: add documentation
 class GalaxyZooDataset(Dataset):
+    """
+    A custom dataset class for loading Galaxy Zoo images and their associated labels.
+    """
     def __init__(self, data_directory, extension=".jpeg", label_file=None, transform=None):
         """
+        Initializes the GalaxyZooDataset.
+
         Parameters
         ----------
         data_directory : str
@@ -16,9 +21,9 @@ class GalaxyZooDataset(Dataset):
         extension : str
             The file extension to use when searching for file. '.jpeg'is the default.
         label_file : str
-            The name of the file that contains the labels used for training of testing. By default None is specified. In this case no labels will be returned for the individual items!
-        transform : TODO add correct class name
-            I a transformation is specified it is applied just before returning a sample. None is default.
+            The name of the file that contains the labels used for training or testing. By default None is specified. In this case no labels will be returned for the individual items!
+        transform : callable, optional
+            If a transformation is specified it is applied just before returning a sample. None is default.
         """
         self.data_directory = data_directory
         self.transform = transform
@@ -40,15 +45,41 @@ class GalaxyZooDataset(Dataset):
             self.idstrings[i] = int(self.files[i].split('/')[-1][0:-4])
 
     def __len__(self):
+        """Returns the total number of samples in the dataset."""
         return self.len
 
     def __getitem__(self, idx):
+        """
+        Retrieve a sample (image and the associated label) from the dataset.
+
+        Parameters
+        ----------
+        idx : int or torch.Tensor
+            Index of the sample to fetch. If a tensor is passed, it is converted to a list.
+
+        Returns
+        -------
+        sample : dict
+            A dictionary containing the image, filename, label, and image ID of the sample.
+        """
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        image = torch.swapaxes(torch.Tensor(io.imread(self.files[idx])/255.0), 0, 2) #to normalize the RGB values to values between 0 and 1 ,swap 0,2 to get 3x424x424
+
+
+        #division by 255 to normalize the values to between 0 and 1
+        #swapaxes to get 3x424x424 (PyTorch expects images in the shape (channels, height, width) for most models)
+        image = torch.swapaxes(torch.Tensor(io.imread(self.files[idx])/255.0), 0, 2) 
         sample = {'images': image, 'filenames': self.files[idx], 'labels': self.labels[idx], 'id': self.idstrings[idx]}
         if self.transform:
             sample = self.transform(sample)
         return sample
 
-# TODO: add a new class for Sebastian's simulation images
+"""
+Example of a sample returned by the GalaxyZooDataset:
+{
+    'images': torch.Tensor with shape (3, 424, 424),
+    'filenames': 'path/to/image_123456.jpeg',
+    'labels': tensor([1, 0, 0, ..., 1]),
+    'id': 123456
+}
+"""
