@@ -1,1 +1,1 @@
-This is my Master's theis where I try different things and compare it to Dieleman's
+This repository contains the code for my Master’s thesis, where I explore different approaches for galaxy morphology classification and compare them to Dieleman’s model (https://ui.adsabs.harvard.edu/abs/2015MNRAS.450.1441D/abstract). The focus is on achieving rotational invariance using various deep learning architectures.
